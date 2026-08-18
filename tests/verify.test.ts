@@ -27,7 +27,7 @@ function fixture(): RedactedSlice {
       originalSeqs: [6, 7],
       lineageOnly: false,
     }],
-    counts: { identifiers: 1, textValues: 0, secrets: 0, paths: 0 },
+    counts: { identifiers: 2, textValues: 0, secrets: 0, paths: 0 },
   }
 }
 
@@ -55,11 +55,30 @@ function rewriteFirstSession(bytes: Uint8Array, mutate: (text: string) => string
   return zipSync(files)
 }
 
+function rewriteReport(bytes: Uint8Array, report: string): Uint8Array {
+  const files = unzipSync(bytes)
+  const manifest = JSON.parse(new TextDecoder().decode(files['manifest.json'])) as JsonObject
+  const payload = new TextEncoder().encode(report)
+  files['REPORT.md'] = payload
+  const file = (manifest['files'] as JsonObject[]).find(item => item['path'] === 'REPORT.md') as JsonObject
+  file['bytes'] = payload.byteLength
+  file['sha256'] = sha256Hex(payload)
+  files['manifest.json'] = new TextEncoder().encode(`${JSON.stringify(manifest)}\n`)
+  return zipSync(files)
+}
+
 describe('verifyBundle', () => {
   it('verifies a generated bundle', async () => {
     const artifact = buildBundle(fixture())
     await expect(verifyBundle(artifact.bytes)).resolves.toMatchObject({
       valid: true,
+      authenticity: 'not-verified',
+      checks: {
+        payloadIntegrity: 'verified',
+        harnessStructure: 'verified',
+        redactionPolicy: 'verified',
+        canonicalReport: 'verified',
+      },
       verifiedFiles: 2,
       verifiedSessions: 1,
     })
@@ -77,6 +96,27 @@ describe('verifyBundle', () => {
     const files = unzipSync(buildBundle(fixture()).bytes)
     const extra = zipSync({ ...files, 'sessions/session-999.jsonl': new Uint8Array() })
     await expect(verifyBundle(extra)).rejects.toMatchObject({ code: 'INVALID_BUNDLE' } satisfies Partial<ReproError>)
+  })
+
+  it('rejects raw sensitive values even when the session hash is updated', async () => {
+    const forged = rewriteFirstSession(
+      buildBundle(fixture()).bytes,
+      text => text.replace('"lossy":0', '"apiKey":"sk-private-token-12345678","lossy":0,"prompt":"private prompt"'),
+    )
+    await expect(verifyBundle(forged)).rejects.toMatchObject({ code: 'INVALID_BUNDLE' } satisfies Partial<ReproError>)
+  })
+
+  it('rejects forged redaction counts', async () => {
+    const forged = rewriteManifest(buildBundle(fixture()).bytes, (manifest) => {
+      const counts = (manifest['redaction'] as JsonObject)['counts'] as JsonObject
+      counts['identifiers'] = 999
+    })
+    await expect(verifyBundle(forged)).rejects.toMatchObject({ code: 'INVALID_BUNDLE' } satisfies Partial<ReproError>)
+  })
+
+  it('rejects a rehashed non-canonical report', async () => {
+    const forged = rewriteReport(buildBundle(fixture()).bytes, '# private report\n\nsk-private-token-12345678\n')
+    await expect(verifyBundle(forged)).rejects.toMatchObject({ code: 'INVALID_BUNDLE' } satisfies Partial<ReproError>)
   })
 
   it.each([

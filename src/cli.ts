@@ -10,7 +10,8 @@ import { inspectExport } from './inspect.js'
 import { loadExport } from './input.js'
 import { redactSlice } from './redact.js'
 import { sliceExport } from './slice.js'
-import type { InspectResult, SliceTarget, VerifyResult } from './types.js'
+import { triageExport } from './triage.js'
+import type { FailureEvidence, InspectResult, SliceTarget, TriageResult, VerifyResult } from './types.js'
 import { canonicalStringify, formatBytes } from './utils.js'
 import { verifyBundle } from './verify.js'
 import { TOOL_VERSION } from './version.js'
@@ -34,6 +35,7 @@ Create deterministic, privacy-aware DeepSeek Harness reproduction bundles.
 
 Usage:
   dsh-repro inspect <export.zip|session.jsonl> [--json]
+  dsh-repro triage <export.zip|session.jsonl> [--json]
   dsh-repro slice <input> --last-error [-o <bundle.repro.zip>] [--force] [--json]
   dsh-repro slice <input> --seq <n> [--session <id>] [-o <path>] [--force] [--json]
   dsh-repro slice <input> --tool-call <id> [--session <id>] [-o <path>] [--force] [--json]
@@ -68,6 +70,7 @@ export async function runCli(argv: readonly string[], io: CliIo = DEFAULT_IO): P
     const command = argv[0]
     const args = argv.slice(1)
     if (command === 'inspect') return await runInspect(parseOptions(args, []), io)
+    if (command === 'triage') return await runTriage(parseOptions(args, []), io)
     if (command === 'slice') return await runSlice(parseOptions(args, ['output', 'session', 'seq', 'tool-call']), io)
     if (command === 'verify') return await runVerify(parseOptions(args, []), io)
     throw new ReproError('USAGE', `unknown command: ${JSON.stringify(command)}`)
@@ -82,6 +85,14 @@ export async function runCli(argv: readonly string[], io: CliIo = DEFAULT_IO): P
     }
     return exitCode(failure.code)
   }
+}
+
+async function runTriage(options: CommonOptions, io: CliIo): Promise<number> {
+  assertOnly(options, new Set())
+  const input = onePositional(options, 'triage')
+  const result = triageExport(await loadExport(input))
+  io.stdout(options.json ? `${canonicalStringify({ ok: true, result })}\n` : renderTriage(result))
+  return 0
 }
 
 async function runInspect(options: CommonOptions, io: CliIo): Promise<number> {
@@ -236,15 +247,61 @@ function renderInspection(result: InspectResult): string {
     `Sessions: ${result.sessions.length}; attachments omitted by default: ${result.omittedAttachments}`,
   ]
   for (const session of result.sessions) {
+    const sessionId = displaySessionId(session.id)
+    const parent = session.parentSession === undefined ? '' : `, parent ${displaySessionId(session.parentSession)}`
     lines.push(
-      `- ${session.id}: ${session.eventCount} event(s), ${session.errorCount} error(s), depth ${session.delegationDepth}${session.parentSession === undefined ? '' : `, parent ${session.parentSession}`}`,
+      `- ${sessionId}: ${session.eventCount} event(s), ${session.errorCount} error(s), depth ${session.delegationDepth}${parent}`,
     )
   }
   return `${lines.join('\n')}\n`
 }
 
 function renderVerification(result: VerifyResult): string {
-  return `Valid dsh-repro v${result.manifest.version}: ${result.verifiedFiles} payload(s), ${result.verifiedSessions} session(s).\n`
+  return `Verified dsh-repro v${result.manifest.version}: ${result.verifiedFiles} payload(s), ${result.verifiedSessions} session(s); authenticity not verified.\n`
+}
+
+function renderTriage(result: TriageResult): string {
+  const lines = [
+    `Failure incidents: ${result.incidentCount} across ${result.source.sessionCount} session(s).`,
+  ]
+  for (const [index, incident] of result.incidents.entries()) {
+    const primary = incident.primaryEvidence
+    lines.push(`${index + 1}. ${incident.fingerprint}`)
+    lines.push(
+      `   Primary: ${displaySessionId(incident.sessionId)}:${primary.seq} ${primary.eventType}; evidence: ${incident.evidence.length}`,
+    )
+    const facts = renderFailureFacts(primary)
+    if (facts.length > 0) lines.push(`   Facts: ${facts.join(', ')}`)
+    lines.push(`   Selector: ${renderSelector(incident.selector.seq, incident.selector.sessionId)}`)
+  }
+  return `${lines.join('\n')}\n`
+}
+
+function renderFailureFacts(evidence: FailureEvidence): string[] {
+  const facts: string[] = []
+  if (evidence.provider !== undefined || evidence.model !== undefined) {
+    facts.push(`route=${JSON.stringify(evidence.provider ?? '?')}/${JSON.stringify(evidence.model ?? '?')}`)
+  }
+  if (evidence.toolName !== undefined) facts.push(`tool=${JSON.stringify(evidence.toolName)}`)
+  if (evidence.errorName !== undefined) facts.push(`error=${JSON.stringify(evidence.errorName)}`)
+  if (evidence.errorCode !== undefined) facts.push(`code=${JSON.stringify(evidence.errorCode)}`)
+  if (evidence.errorStatus !== undefined) facts.push(`status=${evidence.errorStatus}`)
+  if (evidence.outcome !== undefined) facts.push(`outcome=${JSON.stringify(evidence.outcome)}`)
+  return facts
+}
+
+function displaySessionId(sessionId: string): string {
+  return isSafeCliToken(sessionId) ? sessionId : '<session-id available with --json>'
+}
+
+function renderSelector(seq: number, sessionId: string): string {
+  return isSafeCliToken(sessionId)
+    ? `--seq ${seq} --session ${sessionId}`
+    : `--seq ${seq}; exact session id available with --json`
+}
+
+function isSafeCliToken(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:@/+=-]*$/.test(value)
 }
 
 function exitCode(code: ReproErrorCode): number {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -40,6 +40,54 @@ describe('runCli command surface', () => {
     expect(JSON.parse(json.out.join(''))).toMatchObject({ ok: true, result: { kind: 'jsonl' } })
   })
 
+  it('triages correlated failures in human and JSON modes', async () => {
+    const human = capture()
+    expect(await runCli(['triage', input], human.io)).toBe(0)
+    expect(human.out.join('')).toContain('Failure incidents: 1')
+    expect(human.out.join('')).toContain('dsh-failure-v1:')
+    expect(human.out.join('')).toContain('Selector: --seq 12')
+
+    const json = capture()
+    expect(await runCli(['triage', input, '--json'], json.io)).toBe(0)
+    expect(JSON.parse(json.out.join(''))).toMatchObject({
+      ok: true,
+      result: {
+        version: 1,
+        incidentCount: 1,
+        incidents: [{
+          selector: { kind: 'seq', seq: 12, sessionId: 'demo-session-private-id' },
+          primaryEvidence: { eventType: 'tool/result', errorCode: 'EACCES' },
+        }],
+      },
+    })
+  })
+
+  it('does not render an unsafe session id as a shell selector', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-repro-cli-session-id-'))
+    temporaryDirectories.push(directory)
+    const path = join(directory, 'unsafe.jsonl')
+    const sessionId = '$(Write-Output injected)'
+    await writeFile(path, [
+      JSON.stringify({
+        type: 'session', version: 0, id: sessionId, createdAt: 0, delegationDepth: 0,
+      }),
+      JSON.stringify({
+        type: 'turn/end', seq: 0, time: 1,
+        data: { turn: 0, reason: { kind: 'error', error: { code: 'FAIL', message: 'private' } } },
+      }),
+      '',
+    ].join('\n'))
+
+    const human = capture()
+    expect(await runCli(['triage', path], human.io)).toBe(0)
+    expect(human.out.join('')).toContain('exact session id available with --json')
+    expect(human.out.join('')).not.toContain(sessionId)
+
+    const json = capture()
+    expect(await runCli(['triage', path, '--json'], json.io)).toBe(0)
+    expect(JSON.parse(json.out.join('')).result.incidents[0].selector.sessionId).toBe(sessionId)
+  })
+
   it('supports seq and tool-call selectors and human verification', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-repro-cli-'))
     temporaryDirectories.push(directory)
@@ -50,7 +98,8 @@ describe('runCli command surface', () => {
 
     const verify = capture()
     expect(await runCli(['verify', seqBundle], verify.io)).toBe(0)
-    expect(verify.out.join('')).toContain('Valid dsh-repro v1')
+    expect(verify.out.join('')).toContain('Verified dsh-repro v1')
+    expect(verify.out.join('')).toContain('authenticity not verified')
 
     const tool = capture()
     expect(await runCli([

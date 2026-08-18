@@ -19,16 +19,20 @@ is the right backup format, but usually too broad for a public bug report.
 surface:
 
 - selects the last failure, an exact event sequence, or one tool call;
+- correlates failure events into incidents and emits content-free structural
+  fingerprints for regression grouping;
 - retains the enclosing turn, causal `sourceEventSeqs`, tool call/result pairs,
   request state, and available parent lineage;
 - replaces session, call, run, message, and attachment identifiers with stable
   bundle-local aliases;
 - removes prompt, system, reasoning, tool arguments/results, opaque metadata,
-  paths, common credentials, and all attachment bytes by default;
+  schema property names, out-of-profile object keys, paths, common credentials,
+  and all attachment bytes by default;
 - emits deterministic ZIP bytes, payload SHA-256 records, a Markdown timeline,
   and a versioned manifest;
-- verifies archive safety, hashes, schema relationships, contiguous sequence
-  numbers, and the official DeepSeek Harness surface invariants.
+- independently verifies archive safety, hashes, schema relationships, the
+  share-safe policy, canonical report bytes, contiguous sequence numbers, and
+  the official DeepSeek Harness surface invariants.
 
 ## Quick start
 
@@ -36,6 +40,7 @@ Requires Node.js 22.19+ or Node.js 24.
 
 ```console
 pnpm dlx dsh-repro-kit inspect dsh-session-abc.zip
+pnpm dlx dsh-repro-kit triage dsh-session-abc.zip
 pnpm dlx dsh-repro-kit slice dsh-session-abc.zip --last-error
 pnpm dlx dsh-repro-kit verify dsh-session-abc.repro.zip
 ```
@@ -49,6 +54,19 @@ dsh-repro slice export.zip --tool-call call_01JXYZ --output issue-421.repro.zip
 
 Add `--json` to any command for machine-readable output. Existing outputs are
 never replaced unless `--force` is explicit.
+
+## Failure triage
+
+`triage` inventories failures without returning prompts, tool arguments/results,
+paths, opaque payloads, or error messages. It correlates wrappers from the same
+turn and formal workflow/run identifiers into one incident, selects the first
+most-specific evidence, and returns an exact `--seq`/`--session` selector.
+
+Every incident also has a `dsh-failure-v1:<sha256>` structural fingerprint. The
+fingerprint excludes session/call/run ids, paths, sequence numbers, clocks, and
+free text. It describes observed failure structure, not a claimed root cause;
+different partial evidence can therefore produce different fingerprints for the
+same underlying defect.
 
 ## Pipeline
 
@@ -112,6 +130,19 @@ relative timing. Text payloads are replaced by stable placeholders that reveal
 only equality and character count. Real timestamps are normalized to the
 session start.
 
+Harness structural keys and fixed JSON Schema keywords are retained. Names in
+schema maps such as `properties`, `$defs`, and `patternProperties`, plus names
+outside the conservative structural grammar, use stable `<redacted-key-...>`
+placeholders. References such as `required` reuse the same placeholder so valid
+schemas remain debuggable without copying their field names into the output.
+
+The bundle writer audits the final redacted graph before serialization. The
+independent verifier repeats that policy audit from session payloads, recomputes
+redaction counts, and reconstructs `REPORT.md` byte for byte instead of trusting
+its manifest hash alone. Verification proves self-consistency and the supported
+share-safe policy; it does not authenticate who produced the archive, which is
+reported as `authenticity: "not-verified"`.
+
 Automated redaction reduces disclosure risk; it cannot guarantee that every
 plugin-defined field or sensitive numeric value is harmless. Review the bundle
 before sharing it. See [SECURITY.md](SECURITY.md) for the threat model and limits.
@@ -119,10 +150,11 @@ before sharing it. See [SECURITY.md](SECURITY.md) for the threat model and limit
 ## Library API
 
 ```ts
-import { buildBundle, loadExport, redactSlice, sliceExport, verifyBundle } from 'dsh-repro-kit'
+import { buildBundle, loadExport, redactSlice, sliceExport, triageExport, verifyBundle } from 'dsh-repro-kit'
 import { writeFile } from 'node:fs/promises'
 
 const source = await loadExport('dsh-session-abc.zip')
+const incidents = triageExport(source)
 const slice = sliceExport(source, { kind: 'last-error' })
 const artifact = buildBundle(redactSlice(slice))
 
@@ -134,9 +166,9 @@ The `RedactedSlice` returned by `redactSlice()` does not retain the loaded expor
 raw selector values, source paths, or input digests. Retained diagnostic metadata
 still requires review under the threat model above.
 
-Public TypeScript types include `InputLimits`, `SliceTarget`, `RedactedSlice`,
-`BundleManifest`, and `VerifyResult`. Expected failures use `ReproError` with
-stable codes.
+Public TypeScript types include `InputLimits`, `SliceTarget`, `FailureIncident`,
+`TriageResult`, `RedactedSlice`, `BundleManifest`, and `VerifyResult`. Expected
+failures use `ReproError` with stable codes.
 
 ## Exit codes
 

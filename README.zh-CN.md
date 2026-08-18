@@ -17,13 +17,15 @@ DeepSeek Harness 官方导出强调无损，会包含根会话、导出的全部
 `dsh-repro-kit` 保留排障结构，同时缩小披露面：
 
 - 按最后一次错误、精确 seq 或 tool call 定位故障；
+- 将失败事件归并成 incident，并生成不含正文的结构指纹，便于回归聚类；
 - 保留完整目标 turn、递归 `sourceEventSeqs`、工具调用/结果配对、request 状态和
   可用的父会话 lineage；
 - 将 session、call、run、message、attachment ID 替换为 bundle 内稳定别名；
-- 默认删除 prompt、system、reasoning、工具参数/结果、opaque metadata、路径、
-  常见凭证以及所有附件字节；
+- 默认删除 prompt、system、reasoning、工具参数/结果、opaque metadata、schema
+  property 名、策略外对象键、路径、常见凭证以及所有附件字节；
 - 输出确定性 ZIP、Markdown 时间线、版本化 manifest 和 payload SHA-256；
-- 校验 ZIP 安全、哈希、连续 seq、跨文件关系和官方 Harness surface invariant。
+- 独立校验 ZIP 安全、哈希、跨文件关系、share-safe 策略、canonical report、
+  连续 seq 和官方 Harness surface invariant。
 
 ## 快速开始
 
@@ -31,6 +33,7 @@ DeepSeek Harness 官方导出强调无损，会包含根会话、导出的全部
 
 ```console
 pnpm dlx dsh-repro-kit inspect dsh-session-abc.zip
+pnpm dlx dsh-repro-kit triage dsh-session-abc.zip
 pnpm dlx dsh-repro-kit slice dsh-session-abc.zip --last-error
 pnpm dlx dsh-repro-kit verify dsh-session-abc.repro.zip
 ```
@@ -43,6 +46,17 @@ dsh-repro slice export.zip --tool-call call_01JXYZ -o issue-421.repro.zip
 ```
 
 所有命令都支持 `--json`。默认拒绝覆盖已有输出，只有显式传入 `--force` 才覆盖。
+
+## 故障分诊
+
+`triage` 在不返回 prompt、工具参数/结果、路径、opaque payload 或错误正文的前提下，
+列出 export 内的故障。它会把同一 turn 的错误包装和正式 workflow/run 标识归并成
+一个 incident，选择第一条最具体证据，并给出可直接传给 `slice` 的
+`--seq`/`--session` selector。
+
+每个 incident 都带 `dsh-failure-v1:<sha256>` 结构指纹。指纹排除 session/call/run
+ID、路径、seq、时间和自由文本。它描述的是“观测到的失败结构”，并不宣称推断了
+根因；同一底层故障若只有不同的残缺证据，指纹可能不同。
 
 ## 处理链路
 
@@ -98,16 +112,27 @@ entry、session 或行数预算的输入。packed chunk 使用公开的
 usage 和相对时间。正文替换为稳定占位符，仅保留“是否相同”和字符长度关系；真实
 时间戳归一化到 session 起点。
 
+Harness 结构键和固定 JSON Schema 关键字会保留。`properties`、`$defs`、
+`patternProperties` 等 schema map 内的名称，以及不符合保守结构语法的名称，会替换
+为稳定的 `<redacted-key-...>` 占位符；`required` 等引用复用同一占位符，因此合法
+schema 仍可排障，同时不会把字段名复制到输出中。
+
+bundle writer 会在序列化前审计最终脱敏图；独立 verifier 会从 session payload
+重新执行同一策略、重算 redaction counts，并逐字节重建 `REPORT.md`，而不是只相信
+manifest 内自带的哈希。校验证明的是包内自洽和受支持的 share-safe 策略，不证明
+发布者身份，因此结果会明确返回 `authenticity: "not-verified"`。
+
 自动脱敏只能降低泄漏风险，不能保证所有插件自定义字段或敏感数字都无害。公开前
 仍应人工检查 bundle。详细威胁模型见 [SECURITY.md](SECURITY.md)。
 
 ## Library API
 
 ```ts
-import { buildBundle, loadExport, redactSlice, sliceExport, verifyBundle } from 'dsh-repro-kit'
+import { buildBundle, loadExport, redactSlice, sliceExport, triageExport, verifyBundle } from 'dsh-repro-kit'
 import { writeFile } from 'node:fs/promises'
 
 const source = await loadExport('dsh-session-abc.zip')
+const incidents = triageExport(source)
 const slice = sliceExport(source, { kind: 'last-error' })
 const artifact = buildBundle(redactSlice(slice))
 
@@ -118,8 +143,9 @@ await verifyBundle(artifact.bytes)
 `redactSlice()` 返回的 `RedactedSlice` 不保留已加载的原始 export、selector 原值、
 source path 或输入 digest；但按照上面的威胁模型，保留的诊断元数据仍需人工检查。
 
-公开 TypeScript 类型包括 `InputLimits`、`SliceTarget`、`RedactedSlice`、
-`BundleManifest` 和 `VerifyResult`；预期失败使用带稳定错误码的 `ReproError`。
+公开 TypeScript 类型包括 `InputLimits`、`SliceTarget`、`FailureIncident`、
+`TriageResult`、`RedactedSlice`、`BundleManifest` 和 `VerifyResult`；预期失败使用
+带稳定错误码的 `ReproError`。
 
 ## 退出码
 

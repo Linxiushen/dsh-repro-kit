@@ -23,6 +23,26 @@ The public `RedactedSlice` intermediate also drops the loaded source object, raw
 selector values, source paths, and input digests before it reaches the bundle
 builder.
 
+`buildBundle()` applies a runtime share-safe policy gate even when a caller
+constructs a structurally compatible `RedactedSlice` without `redactSlice()`.
+`verifyBundle()` independently reapplies that policy to parsed session payloads,
+recomputes redaction counts, and byte-compares a reconstructed canonical report.
+Both paths enforce JSON depth/node budgets before recursive serialization.
+
+Object keys are data too. `share-safe-v1` retains a conservative structural
+field grammar plus fixed JSON Schema keywords such as `$ref` and `$defs`. Names
+inside schema maps such as `properties`, `$defs`, and `patternProperties`, plus
+numeric-leading, non-ASCII, regex-shaped, overlong, and unknown `$...` keys, are
+replaced with stable `<redacted-key-...>` placeholders. Schema references such
+as `required` reuse those placeholders. This keeps arbitrary plugin events and
+remote tool schemas usable without copying dynamic schema names or
+out-of-profile plugin names into a bundle. Counts include key occurrences.
+
+Payload SHA-256 values establish only internal consistency because the hashes
+travel inside the same archive. Verification deliberately reports
+`authenticity: "not-verified"`; obtain and compare an out-of-band archive digest
+when publisher authenticity matters.
+
 ## Limitations
 
 This is a disclosure-risk reduction tool, not a proof of anonymization.
@@ -35,5 +55,7 @@ This is a disclosure-risk reduction tool, not a proof of anonymization.
 - Maliciously chosen retained metadata may resemble or contain sensitive data;
   common token, email, URL, and path patterns are scrubbed, but no detector is
   complete.
+- Verification does not provide a signature, publisher identity, timestamping
+  authority, or provenance attestation.
 
 Always review `REPORT.md`, `manifest.json`, and the session JSONL before sharing.

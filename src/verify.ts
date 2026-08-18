@@ -2,17 +2,22 @@ import { readFile, stat } from 'node:fs/promises'
 import { isJsonValue, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { foldSurface } from '@deepseek-ai/dsh-session/surface'
 import { unzipSync } from 'fflate'
+import { REDACTION_NOTICE, renderReport } from './bundle.js'
 import { ReproError } from './errors.js'
 import { decodeUtf8Strict, parseJsonStrict } from './json.js'
+import { auditRedactedSlice, ShareSafePolicyError } from './redaction-policy.js'
 import {
   BUNDLE_FORMAT_VERSION,
   SUPPORTED_SESSION_FORMAT_VERSION,
   type BundleFileRecord,
   type BundleManifest,
   type BundleSessionRecord,
+  type RedactedSession,
+  type RedactedSlice,
+  type SessionHeaderRecord,
   type VerifyResult,
 } from './types.js'
-import { isRecord, sha256Hex } from './utils.js'
+import { isRecord, sha256Hex, utf8 } from './utils.js'
 
 const MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 const MAX_ENTRY_BYTES = 32 * 1024 * 1024
@@ -20,6 +25,7 @@ const MAX_TOTAL_BYTES = 128 * 1024 * 1024
 const MAX_ENTRIES = 256
 const SAFE_BUNDLE_PATH = /^(?:manifest\.json|REPORT\.md|sessions\/session-\d+\.jsonl)$/
 const SESSION_ALIAS = /^session-\d+$/
+const SEMVER = /^\d+\.\d+\.\d+(?:-[\dA-Za-z.-]+)?(?:\+[\dA-Za-z.-]+)?$/
 const PATH_PLACEHOLDER = /^<redacted-path-\d+ chars=\d+>$/
 const TEXT_PLACEHOLDER = /^<redacted-text-\d+ chars=\d+>$/
 const EVENT_KEYS = new Set(['type', 'seq', 'time', 'data', 'surfaceOp', 'sourceEventSeqs', 'ignorable'])
@@ -43,9 +49,24 @@ export async function verifyBundle(input: string | Uint8Array): Promise<VerifyRe
   assertManifest(manifest)
   verifyPayloadSet(files, manifest)
   verifyPayloadHashes(files, manifest.files)
-  verifySessions(files, manifest)
+  const sessions = verifySessions(files, manifest)
+  const slice = reconstructedSlice(manifest, sessions)
+  try {
+    auditRedactedSlice(slice)
+  } catch (error: unknown) {
+    if (error instanceof ShareSafePolicyError) invalid(`share-safe-v1 policy violation: ${error.message}`)
+    throw error
+  }
+  verifyCanonicalReport(ownFile(files, 'REPORT.md'), slice, manifest.selection.outputSeq)
   return {
     valid: true,
+    authenticity: 'not-verified',
+    checks: {
+      payloadIntegrity: 'verified',
+      harnessStructure: 'verified',
+      redactionPolicy: 'verified',
+      canonicalReport: 'verified',
+    },
     manifest,
     verifiedFiles: manifest.files.length,
     verifiedSessions: manifest.sessions.length,
@@ -113,7 +134,7 @@ function assertManifest(value: unknown): asserts value is BundleManifest {
   }
   if (!isRecord(value.tool) || !hasExactKeys(value.tool, ['name', 'version'])
     || value.tool.name !== 'dsh-repro-kit' || typeof value.tool.version !== 'string'
-    || value.tool.version.length === 0) invalid('invalid tool metadata')
+    || !SEMVER.test(value.tool.version)) invalid('invalid tool metadata')
   if (!isRecord(value.source) || !hasExactKeys(value.source, [
     'kind', 'bytes', 'sessionCount', 'omittedAttachmentCount',
   ]) || (value.source.kind !== 'zip' && value.source.kind !== 'jsonl')
@@ -130,7 +151,7 @@ function assertManifest(value: unknown): asserts value is BundleManifest {
     || value.selection.policy !== 'enclosing-turn+causal-sources+tool-pairs+lineage') invalid('invalid selection metadata')
   if (!isRecord(value.redaction) || !hasExactKeys(value.redaction, ['profile', 'counts', 'notice'])
     || value.redaction.profile !== 'share-safe-v1'
-    || typeof value.redaction.notice !== 'string' || value.redaction.notice.length === 0
+    || value.redaction.notice !== REDACTION_NOTICE
     || !isCounts(value.redaction.counts)) invalid('invalid redaction metadata')
   if (!Array.isArray(value.sessions) || !Array.isArray(value.omittedAttachments) || !Array.isArray(value.files)) {
     invalid('manifest collections must be arrays')
@@ -211,8 +232,9 @@ function verifyPayloadHashes(files: Record<string, Uint8Array>, records: readonl
   }
 }
 
-function verifySessions(files: Record<string, Uint8Array>, manifest: BundleManifest): void {
+function verifySessions(files: Record<string, Uint8Array>, manifest: BundleManifest): RedactedSession[] {
   const parsed = new Map<string, Record<string, unknown>[]>()
+  const sessions: RedactedSession[] = []
   for (const record of manifest.sessions) {
     const text = decodeUtf8Strict(ownFile(files, record.file), record.file)
     if (!text.endsWith('\n')) invalid(`${record.file} must end with a newline`)
@@ -236,6 +258,12 @@ function verifySessions(files: Record<string, Uint8Array>, manifest: BundleManif
       )
     }
     parsed.set(record.id, events as Record<string, unknown>[])
+    sessions.push({
+      header: header as unknown as SessionHeaderRecord,
+      events: events as SessionEvent[],
+      originalSeqs: record.originalSeqs,
+      lineageOnly: record.lineageOnly,
+    })
   }
   const targetEvents = parsed.get(manifest.selection.sessionId)
   const target = targetEvents?.[manifest.selection.outputSeq]
@@ -245,6 +273,35 @@ function verifySessions(files: Record<string, Uint8Array>, manifest: BundleManif
   const targetSession = manifest.sessions.find(session => session.id === manifest.selection.sessionId)
   if (targetSession?.originalSeqs[manifest.selection.outputSeq] !== manifest.selection.originalSeq) {
     invalid('selection originalSeq does not match the target session mapping')
+  }
+  return sessions
+}
+
+function reconstructedSlice(manifest: BundleManifest, sessions: readonly RedactedSession[]): RedactedSlice {
+  return {
+    source: {
+      kind: manifest.source.kind,
+      bytes: manifest.source.bytes,
+      sessionCount: manifest.source.sessionCount,
+      omittedAttachments: manifest.omittedAttachments,
+    },
+    requestedTarget: { kind: manifest.selection.kind },
+    target: {
+      kind: manifest.selection.kind,
+      sessionId: manifest.selection.sessionId,
+      originalSeq: manifest.selection.originalSeq,
+      eventType: manifest.selection.eventType,
+    },
+    sessions,
+    counts: manifest.redaction.counts,
+  }
+}
+
+function verifyCanonicalReport(bytes: Uint8Array, slice: RedactedSlice, outputSeq: number): void {
+  const expected = utf8(renderReport(slice, outputSeq))
+  if (bytes.byteLength !== expected.byteLength
+    || bytes.some((value, index) => value !== expected[index])) {
+    invalid('REPORT.md is not the canonical report for the verified payload')
   }
 }
 

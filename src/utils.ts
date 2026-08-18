@@ -23,7 +23,7 @@ function canonicalize(value: unknown): JsonValue {
   }
   if (Array.isArray(value)) return value.map(item => canonicalize(item))
   if (isRecord(value)) {
-    const result: Record<string, JsonValue> = {}
+    const result = Object.create(null) as Record<string, JsonValue>
     for (const key of Object.keys(value).sort()) {
       const item = value[key]
       if (item !== undefined) result[key] = canonicalize(item)

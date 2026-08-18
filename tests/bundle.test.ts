@@ -1,9 +1,16 @@
+import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { unzipSync } from 'fflate'
 import { describe, expect, it } from 'vitest'
 import { buildBundle } from '../src/bundle.js'
+import { ReproError } from '../src/errors.js'
 import type { RedactedSlice } from '../src/types.js'
 import { sha256Hex } from '../src/utils.js'
+
+const TIMEZONE_CHILD = 'DSH_REPRO_TIMEZONE_CHILD'
+const TIMEZONE_DIGEST_MARKER = 'DSH_REPRO_BUNDLE_SHA256='
+const TIMEZONE_DIGEST_TEST = 'emits a bundle digest for timezone comparison'
 
 function fixture(): RedactedSlice {
   const event = {
@@ -27,8 +34,24 @@ function fixture(): RedactedSlice {
       originalSeqs: [9],
       lineageOnly: false,
     }],
-    counts: { identifiers: 1, textValues: 2, secrets: 3, paths: 4 },
+    counts: { identifiers: 3, textValues: 0, secrets: 0, paths: 0 },
   }
+}
+
+function bundleDigestInTimezone(timezone: string): string {
+  const vitestCli = fileURLToPath(new URL('../node_modules/vitest/vitest.mjs', import.meta.url))
+  const testFile = fileURLToPath(import.meta.url)
+  const output = execFileSync(
+    process.execPath,
+    [vitestCli, 'run', testFile, '-t', TIMEZONE_DIGEST_TEST, '--reporter=verbose'],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, FORCE_COLOR: '0', TZ: timezone, [TIMEZONE_CHILD]: '1' },
+    },
+  )
+  const digest = output.match(new RegExp(`${TIMEZONE_DIGEST_MARKER}([a-f0-9]{64})`))?.[1]
+  if (digest === undefined) throw new Error(`timezone child did not emit a bundle digest:\n${output}`)
+  return digest
 }
 
 describe('buildBundle', () => {
@@ -50,4 +73,44 @@ describe('buildBundle', () => {
       expect(sha256Hex(files[record.path]!)).toBe(record.sha256)
     }
   })
+
+  it('rejects a structurally forged RedactedSlice containing raw sensitive values', () => {
+    const forged = structuredClone(fixture()) as unknown as {
+      sessions: { events: { data: Record<string, unknown> }[] }[]
+    }
+    forged.sessions[0]!.events[0]!.data['prompt'] = 'private prompt'
+    forged.sessions[0]!.events[0]!.data['apiKey'] = 'sk-private-token-12345678'
+    expect(() => buildBundle(forged as unknown as RedactedSlice)).toThrowError(ReproError)
+    try {
+      buildBundle(forged as unknown as RedactedSlice)
+    } catch (error: unknown) {
+      expect(error).toMatchObject({ code: 'INVALID_SESSION' })
+      expect(String(error)).not.toContain('private prompt')
+      expect(String(error)).not.toContain('sk-private-token')
+    }
+  })
+
+  it('rejects excessive JSON depth before serialization', () => {
+    const forged = structuredClone(fixture()) as unknown as {
+      sessions: { events: { data: Record<string, unknown> }[] }[]
+    }
+    let nested: Record<string, unknown> = {}
+    forged.sessions[0]!.events[0]!.data['nested'] = nested
+    for (let depth = 0; depth < 200; depth += 1) {
+      const child: Record<string, unknown> = {}
+      nested['child'] = child
+      nested = child
+    }
+    expect(() => buildBundle(forged as unknown as RedactedSlice)).toThrowError(/depth budget/)
+  })
+
+  if (process.env[TIMEZONE_CHILD] === '1') {
+    it(TIMEZONE_DIGEST_TEST, () => {
+      process.stdout.write(`${TIMEZONE_DIGEST_MARKER}${sha256Hex(buildBundle(fixture()).bytes)}\n`)
+    })
+  } else {
+    it('produces identical ZIP bytes in UTC and Asia/Shanghai', () => {
+      expect(bundleDigestInTimezone('UTC')).toBe(bundleDigestInTimezone('Asia/Shanghai'))
+    })
+  }
 })

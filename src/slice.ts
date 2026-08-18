@@ -1,5 +1,6 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { ReproError } from './errors.js'
+import { isFailureEvent } from './failure.js'
 import type {
   LoadedExport,
   ParsedSession,
@@ -62,35 +63,6 @@ function compareSessionRefs(left: EventRef, right: EventRef): number {
     || compareStrings(left.session.sourceSha256, right.session.sourceSha256)
     || left.event.seq - right.event.seq
     || compareStrings(left.event.type, right.event.type)
-}
-
-function isErrorEvent(event: SessionEvent): boolean {
-  const data = eventData(event)
-  const type: string = event.type
-  if (event.type === 'turn/end') {
-    return isRecord(data?.['reason']) && data['reason']['kind'] === 'error'
-  }
-  if (event.type === 'tool/result') {
-    if (data?.['error'] !== undefined) return true
-    const message = data?.['message']
-    return isRecord(message)
-      && Array.isArray(message['content'])
-      && message['content'].some(block => (
-        isRecord(block) && block['type'] === 'tool-result' && block['isError'] === true
-      ))
-  }
-  if (type === 'command/done') return data?.['kind'] === 'error'
-  if (type === 'compaction/end') return data?.['error'] !== undefined
-  if (type === 'tool/code-dispatch') return data?.['isError'] === true
-  if (type === 'tool-workflow/agent-end') return data?.['outcome'] === 'failed'
-  if (type === 'tool-workflow/run-end') return data?.['stopReason'] === 'error'
-  if (type.endsWith('/error')) return true
-  if (event.type !== 'assistant/chunk') return false
-
-  const chunk = data?.['chunk']
-  if (!isRecord(chunk)) return false
-  if (chunk['type'] === 'error') return true
-  return isRecord(chunk['reason']) && chunk['reason']['kind'] === 'error'
 }
 
 function assistantToolCallIds(event: SessionEvent): string[] {
@@ -176,7 +148,7 @@ function resolveTarget(source: LoadedExport, target: SliceTarget): EventRef {
     for (const session of source.sessions) {
       let latest: SessionEvent | undefined
       for (const event of session.events) {
-        if (isErrorEvent(event) && (latest === undefined || event.seq > latest.seq)) latest = event
+        if (isFailureEvent(event) && (latest === undefined || event.seq > latest.seq)) latest = event
       }
       if (latest !== undefined) errors.push({ session, event: latest })
     }

@@ -194,8 +194,67 @@ export interface InspectResult {
   readonly omittedAttachments: number
 }
 
+export const FAILURE_FINGERPRINT_VERSION = 1 as const
+
+export type FailureKind =
+  | 'assistant-stream'
+  | 'code-dispatch'
+  | 'command'
+  | 'compaction'
+  | 'event'
+  | 'tool'
+  | 'turn'
+  | 'workflow-agent'
+  | 'workflow-run'
+
+/** Share-conscious structured facts from one durable failure event. */
+export interface FailureEvidence {
+  readonly seq: number
+  readonly eventType: string
+  readonly kind: FailureKind
+  readonly turn?: number
+  readonly step?: number
+  readonly provider?: string
+  readonly model?: string
+  readonly toolName?: string
+  readonly errorName?: string
+  readonly errorCode?: string
+  readonly errorStatus?: number
+  readonly outcome?: string
+}
+
+/** Failure events deterministically correlated within one session. */
+export interface FailureIncident {
+  readonly fingerprint: `dsh-failure-v${typeof FAILURE_FINGERPRINT_VERSION}:${string}`
+  readonly sessionId: string
+  readonly selector: { readonly kind: 'seq'; readonly seq: number; readonly sessionId: string }
+  readonly primaryEvidence: FailureEvidence
+  readonly evidence: readonly FailureEvidence[]
+  readonly relatedSeqs: readonly number[]
+  readonly failedStepCount: number
+}
+
+/** Privacy-conscious failure inventory for an export. Message bodies and opaque payloads are excluded. */
+export interface TriageResult {
+  readonly version: typeof FAILURE_FINGERPRINT_VERSION
+  readonly source: {
+    readonly kind: InputKind
+    readonly bytes: number
+    readonly sessionCount: number
+  }
+  readonly incidentCount: number
+  readonly incidents: readonly FailureIncident[]
+}
+
 export interface VerifyResult {
   readonly valid: true
+  readonly authenticity: 'not-verified'
+  readonly checks: {
+    readonly payloadIntegrity: 'verified'
+    readonly harnessStructure: 'verified'
+    readonly redactionPolicy: 'verified'
+    readonly canonicalReport: 'verified'
+  }
   readonly manifest: BundleManifest
   readonly verifiedFiles: number
   readonly verifiedSessions: number

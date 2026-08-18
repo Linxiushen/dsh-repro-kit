@@ -9,6 +9,12 @@ describe('public utility invariants', () => {
     expect(() => canonicalStringify(1n)).toThrow(TypeError)
   })
 
+  it('serializes prototype-named JSON members as ordinary data', () => {
+    const value = JSON.parse('{"__proto__":{"polluted":true}}') as Record<string, unknown>
+    expect(canonicalStringify(value)).toBe('{"__proto__":{"polluted":true}}')
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined()
+  })
+
   it('hashes UTF-8 and formats byte units', () => {
     expect(sha256Hex(utf8('abc'))).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
     expect(formatBytes(12)).toBe('12 B')

@@ -24,7 +24,10 @@
       "required": ["name", "version"],
       "properties": {
         "name": { "const": "dsh-repro-kit" },
-        "version": { "type": "string", "minLength": 1 }
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+        }
       }
     },
     "source": {
@@ -57,7 +60,9 @@
       "required": ["profile", "counts", "notice"],
       "properties": {
         "profile": { "const": "share-safe-v1" },
-        "notice": { "type": "string", "minLength": 1 },
+        "notice": {
+          "const": "Automated redaction reduces disclosure risk but cannot guarantee removal of all sensitive information. Review before sharing."
+        },
         "counts": {
           "type": "object",
           "additionalProperties": false,

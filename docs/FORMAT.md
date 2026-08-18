@@ -22,6 +22,24 @@ The ZIP container itself is deterministic but does not need a manifest record.
 The source export SHA-256 is not emitted. This is intentional: an unsalted
 digest can act as a confirmation oracle for guessed low-entropy source content.
 
+Hashes are an internal integrity mechanism, not an authenticity mechanism. A v1
+verifier also reapplies `share-safe-v1`, recomputes its occurrence counts, and
+reconstructs `REPORT.md` from the manifest plus session payloads. A rehashed but
+non-canonical report or unredacted payload is invalid.
+
+## Failure fingerprints
+
+`dsh-failure-v1:<sha256>` values returned by the triage API/CLI are not stored in
+the v1 bundle contract. They hash canonical structured failure facts while
+excluding raw identifiers, sequence numbers, timestamps, paths, and free text.
+The prefix versions triage semantics independently from this archive format.
+
+`share-safe-v1` also treats object member names as data. Harness structural
+keys and fixed JSON Schema keywords are retained. Schema map members and names
+outside the conservative structural grammar become stable `<redacted-key-...>`
+placeholders; `required`-style references reuse them. Every key occurrence
+that is replaced contributes to `textValues` counts.
+
 ## Sequence mapping
 
 Session events are sorted by original sequence, then assigned output sequences

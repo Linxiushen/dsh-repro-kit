@@ -1,4 +1,19 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import {
+  assertRedactionBudget,
+  auditRedactedSlice,
+  BEARER,
+  EMAIL,
+  isPreservedObjectKey,
+  isSchemaMapPath,
+  OPAQUE_KEYS,
+  REDACTION_PLACEHOLDER,
+  SENSITIVE_KEY,
+  stringDisposition,
+  TOKEN,
+  type AliasKind,
+  type TextKind,
+} from './redaction-policy.js'
 import type {
   RedactedAttachment,
   RedactedSession,
@@ -10,62 +25,17 @@ import type {
 } from './types.js'
 import { canonicalStringify, isRecord } from './utils.js'
 
-type AliasKind = 'session' | 'call' | 'run' | 'message' | 'attachment'
-type TextKind = 'text' | 'opaque' | 'path' | 'secret' | 'email' | 'url'
-
-const PRESERVED_STRING_KEYS = new Set([
-  'type',
-  'kind',
-  'role',
-  'source',
-  'form',
-  'status',
-  'reason',
-  'provider',
-  'model',
-  'name',
-  'code',
-  'finishReason',
-  'mimeType',
-  'surfaceOp',
-  'op',
-])
-
-const CONTENT_KEYS = new Set([
-  'system',
-  'text',
-  'reasoning',
-  'arguments',
-  'argumentsDelta',
-  'prompt',
-  'output',
-  'result',
-  'message',
-  'summary',
-  'description',
-  'instructions',
-  'objective',
-])
-
-const OPAQUE_KEYS = new Set(['meta', 'replayState', 'raw', 'body', 'headers'])
-const PATH_KEYS = new Set(['cwd', 'path', 'file', 'filename', 'directory', 'root', 'workingDirectory'])
-const SENSITIVE_KEY = /(?:^|_)(?:api[-_]?key|secret|token|password|passwd|authorization|cookie|credential)(?:$|_)/i
-const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi
-const TOKEN = /\b(?:AKIA[0-9A-Z]{16}|(?:sk|gh[opusr]|github_pat|xox[baprs])[-_A-Za-z0-9]{8,})\b/g
-const BEARER = /\bBearer\s+[^\s,;]+/gi
-const ABSOLUTE_PATH = /^(?:[A-Za-z]:[\\/]|\\\\|\/)/
-
 /** Apply the default share-safe redaction profile to a causal slice. */
 export function redactSlice(slice: SliceResult): RedactedSlice {
   const redactor = new StableRedactor()
 
   // Seed aliases in bundle order so identifiers never depend on object traversal.
-  for (const session of slice.sessions) redactor.alias('session', session.header.id)
+  for (const session of slice.sessions) redactor.seedAlias('session', session.header.id)
   for (const session of slice.sessions) {
-    if (session.header.parentSession !== undefined) redactor.alias('session', session.header.parentSession)
+    if (session.header.parentSession !== undefined) redactor.seedAlias('session', session.header.parentSession)
   }
   const omittedAttachments: RedactedAttachment[] = []
-  for (const attachment of [...slice.source.attachments].sort((a, b) => a.sourcePath.localeCompare(b.sourcePath))) {
+  for (const attachment of [...slice.source.attachments].sort((a, b) => compareCodePoints(a.sourcePath, b.sourcePath))) {
     const rawId = attachmentIdFromPath(attachment.sourcePath)
     omittedAttachments.push({
       id: redactor.alias('attachment', rawId),
@@ -75,7 +45,9 @@ export function redactSlice(slice: SliceResult): RedactedSlice {
   }
 
   const sessions = slice.sessions.map(session => redactSession(session, redactor))
-  return {
+  const targetEventType = redactor.value(slice.target.eventType, ['eventType'], undefined)
+  if (typeof targetEventType !== 'string') throw new TypeError('redacted target event type must remain a string')
+  const result: RedactedSlice = {
     source: {
       kind: slice.source.kind,
       bytes: slice.source.sourceBytes,
@@ -86,10 +58,13 @@ export function redactSlice(slice: SliceResult): RedactedSlice {
     target: {
       ...slice.target,
       sessionId: redactor.alias('session', slice.target.sessionId),
+      eventType: targetEventType,
     },
     sessions,
     counts: redactor.counts(),
   }
+  auditRedactedSlice(result)
+  return result
 }
 
 function redactSession(session: SlicedSession, redactor: StableRedactor): RedactedSession {
@@ -120,6 +95,7 @@ function redactSession(session: SlicedSession, redactor: StableRedactor): Redact
 }
 
 function redactEvent(event: SessionEvent, baseTime: number, redactor: StableRedactor): SessionEvent {
+  assertRedactionBudget(event)
   const eventRecord = event as unknown as Record<string, unknown>
   const transformed = redactor.value(eventRecord, [], undefined)
   if (!isRecord(transformed)) throw new TypeError('redacted event must remain an object')
@@ -135,8 +111,16 @@ class StableRedactor {
   private secretOccurrences = 0
   private pathOccurrences = 0
 
+  seedAlias(kind: AliasKind, raw: string): void {
+    this.aliasValue(kind, raw)
+  }
+
   alias(kind: AliasKind, raw: string): string {
     this.identifierOccurrences += 1
+    return this.aliasValue(kind, raw)
+  }
+
+  private aliasValue(kind: AliasKind, raw: string): string {
     let values = this.aliases.get(kind)
     if (values === undefined) {
       values = new Map()
@@ -181,36 +165,35 @@ class StableRedactor {
     if (Array.isArray(value)) return value.map((item, index) => this.value(item, [...path, String(index)], undefined))
     if (!isRecord(value)) return this.text('opaque', String(value))
 
-    const result: Record<string, unknown> = {}
+    const result = Object.create(null) as Record<string, unknown>
     for (const key of Object.keys(value)) {
       const child = value[key]
       if (child === undefined) continue
+      const schemaMap = isSchemaMapPath(path)
+      const keyKind = SENSITIVE_KEY.test(key) && !schemaMap ? 'secret-key' : 'key'
+      const outputKey = isPreservedObjectKey(key, path) ? key : this.text(keyKind, key)
       if (OPAQUE_KEYS.has(key)) {
-        result[key] = this.text('opaque', canonicalStringify(child))
-      } else if (SENSITIVE_KEY.test(key)) {
-        result[key] = this.text('secret', canonicalStringify(child))
+        result[outputKey] = this.text('opaque', canonicalStringify(child))
+      } else if (SENSITIVE_KEY.test(key) && !schemaMap) {
+        result[outputKey] = this.text('secret', canonicalStringify(child))
       } else {
-        result[key] = this.value(child, [...path, key], value)
+        result[outputKey] = this.value(child, [...path, outputKey], value)
       }
     }
     return result
   }
 
   private string(raw: string, path: readonly string[], parent: Record<string, unknown> | undefined): string {
-    const key = path.at(-1) ?? ''
-    const aliasKind = identifierKind(key, path, parent)
-    if (aliasKind !== undefined) return this.alias(aliasKind, raw)
-    if (PATH_KEYS.has(key) || ABSOLUTE_PATH.test(raw)) return this.text('path', raw)
-    if (SENSITIVE_KEY.test(key)) return this.text('secret', raw)
-    if (CONTENT_KEYS.has(key) || key === 'content' || key === 'data' && path.includes('content')) {
-      return this.text('text', raw)
-    }
-    if (!PRESERVED_STRING_KEYS.has(key)) return this.text('text', raw)
+    const disposition = stringDisposition(raw, path, parent)
+    if (disposition.kind === 'alias') return this.alias(disposition.aliasKind, raw)
+    if (disposition.kind === 'text') return this.text(disposition.textKind, raw)
     return this.scrubMetadata(raw)
   }
 
   private scrubMetadata(raw: string): string {
-    let result = raw.replace(BEARER, value => this.text('secret', value))
+    REDACTION_PLACEHOLDER.lastIndex = 0
+    let result = raw.replace(REDACTION_PLACEHOLDER, value => this.text('text', value))
+    result = result.replace(BEARER, value => this.text('secret', value))
     result = result.replace(TOKEN, value => this.text('secret', value))
     result = result.replace(EMAIL, value => this.text('email', value.toLowerCase()))
     if (/^[a-z][a-z\d+.-]*:\/\//i.test(result)) return this.text('url', result)
@@ -218,25 +201,24 @@ class StableRedactor {
   }
 }
 
-function identifierKind(
-  key: string,
-  path: readonly string[],
-  parent: Record<string, unknown> | undefined,
-): AliasKind | undefined {
-  if (key === 'sessionId' || key === 'parentSession' || key === 'parentSessionId') return 'session'
-  if (key === 'callId' || key === 'toolCallId') return 'call'
-  if (key === 'runId') return 'run'
-  if (key === 'messageId') return 'message'
-  if (key === 'attachmentId') return 'attachment'
-  if (key !== 'id') return undefined
-  if (parent?.type === 'tool-call' || parent?.type === 'tool-call-delta') return 'call'
-  if (parent?.type === 'image' || path.includes('attachment')) return 'attachment'
-  if (path.at(-2) === 'message') return 'message'
-  return undefined
-}
-
 function attachmentIdFromPath(path: string): string {
   const filename = path.split('/').at(-1) ?? path
   const extension = filename.lastIndexOf('.')
   return extension > 0 ? filename.slice(0, extension) : filename
+}
+
+function compareCodePoints(left: string, right: string): number {
+  const leftIterator = left[Symbol.iterator]()
+  const rightIterator = right[Symbol.iterator]()
+  for (;;) {
+    const leftPoint = leftIterator.next()
+    const rightPoint = rightIterator.next()
+    if (leftPoint.done || rightPoint.done) {
+      if (leftPoint.done && rightPoint.done) return 0
+      return leftPoint.done ? -1 : 1
+    }
+    const leftValue = leftPoint.value.codePointAt(0) as number
+    const rightValue = rightPoint.value.codePointAt(0) as number
+    if (leftValue !== rightValue) return leftValue < rightValue ? -1 : 1
+  }
 }

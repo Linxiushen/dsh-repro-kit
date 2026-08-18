@@ -1,6 +1,7 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { zipSync, type Zippable } from 'fflate'
 import { ReproError } from './errors.js'
+import { auditRedactedSlice, ShareSafePolicyError } from './redaction-policy.js'
 import {
   BUNDLE_FORMAT_VERSION,
   type BundleArtifact,
@@ -13,12 +14,21 @@ import {
 import { canonicalStringify, sha256Hex, utf8 } from './utils.js'
 import { TOOL_NAME, TOOL_VERSION } from './version.js'
 
-const FIXED_ZIP_TIME = new Date('1980-01-01T00:00:00.000Z')
+// fflate serializes local Date fields into the timezone-free DOS timestamp.
+const FIXED_ZIP_TIME = new Date(1980, 0, 1, 0, 0, 0)
 const REGULAR_FILE_MODE = (0o100644 * 0x1_0000) >>> 0
-const REDACTION_NOTICE = 'Automated redaction reduces disclosure risk but cannot guarantee removal of all sensitive information. Review before sharing.'
+export const REDACTION_NOTICE = 'Automated redaction reduces disclosure risk but cannot guarantee removal of all sensitive information. Review before sharing.'
 
 /** Build a byte-for-byte deterministic reproduction ZIP from a redacted slice. */
 export function buildBundle(slice: RedactedSlice): BundleArtifact {
+  try {
+    auditRedactedSlice(slice)
+  } catch (error: unknown) {
+    if (error instanceof ShareSafePolicyError) {
+      throw new ReproError('INVALID_SESSION', `redacted slice violates share-safe-v1: ${error.message}`, {}, { cause: error })
+    }
+    throw error
+  }
   const sessionPayloads = new Map<string, Uint8Array>()
   const sessionRecords: BundleSessionRecord[] = []
   for (const session of slice.sessions) {
@@ -47,10 +57,10 @@ export function buildBundle(slice: RedactedSlice): BundleArtifact {
   const payloads = new Map<string, Uint8Array>([['REPORT.md', reportBytes], ...sessionPayloads])
   const fileRecords = [...payloads]
     .map(([path, bytes]): BundleFileRecord => ({ path, bytes: bytes.byteLength, sha256: sha256Hex(bytes) }))
-    .sort((a, b) => a.path.localeCompare(b.path))
+    .sort((a, b) => compareStrings(a.path, b.path))
 
   const omittedAttachments = [...slice.source.omittedAttachments]
-    .sort((a, b) => a.id.localeCompare(b.id))
+    .sort((a, b) => compareStrings(a.id, b.id))
 
   const manifest: BundleManifest = {
     format: 'dsh-repro',
@@ -84,7 +94,7 @@ export function buildBundle(slice: RedactedSlice): BundleArtifact {
   const archiveFiles: Zippable = {}
   archiveFiles['manifest.json'] = zipFile(manifestBytes)
   archiveFiles['REPORT.md'] = zipFile(reportBytes)
-  for (const [path, bytes] of [...sessionPayloads].sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [path, bytes] of [...sessionPayloads].sort(([a], [b]) => compareStrings(a, b))) {
     archiveFiles[path] = zipFile(bytes)
   }
   const bytes = zipSync(archiveFiles, { level: 9, mtime: FIXED_ZIP_TIME, attrs: REGULAR_FILE_MODE })
@@ -100,7 +110,7 @@ function serializeSession(session: RedactedSession): Uint8Array {
   return utf8(`${lines.join('\n')}\n`)
 }
 
-function renderReport(slice: RedactedSlice, outputSeq: number): string {
+export function renderReport(slice: RedactedSlice, outputSeq: number): string {
   const lines = [
     '# DeepSeek Harness reproduction bundle',
     '',
@@ -166,4 +176,8 @@ function timelineRows(slice: RedactedSlice): string[] {
 
 function inlineCode(value: string): string {
   return `\`${value.replaceAll('`', '\\`').replace(/[\r\n|]/g, ' ')}\``
+}
+
+function compareStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
 }
