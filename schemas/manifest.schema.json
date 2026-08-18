@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Linxiushen/dsh-repro-kit/main/schemas/manifest.schema.json",
+  "title": "dsh-repro manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "version",
+    "tool",
+    "source",
+    "selection",
+    "redaction",
+    "sessions",
+    "omittedAttachments",
+    "files"
+  ],
+  "properties": {
+    "format": { "const": "dsh-repro" },
+    "version": { "const": 1 },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "dsh-repro-kit" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "bytes", "sessionCount", "omittedAttachmentCount"],
+      "properties": {
+        "kind": { "enum": ["jsonl", "zip"] },
+        "bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "sessionCount": { "$ref": "#/$defs/nonNegativeInteger" },
+        "omittedAttachmentCount": { "$ref": "#/$defs/nonNegativeInteger" }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sessionId", "originalSeq", "outputSeq", "eventType", "policy"],
+      "properties": {
+        "kind": { "enum": ["last-error", "seq", "tool-call"] },
+        "sessionId": { "$ref": "#/$defs/sessionAlias" },
+        "originalSeq": { "$ref": "#/$defs/nonNegativeInteger" },
+        "outputSeq": { "$ref": "#/$defs/nonNegativeInteger" },
+        "eventType": { "type": "string", "minLength": 1 },
+        "policy": { "const": "enclosing-turn+causal-sources+tool-pairs+lineage" }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "counts", "notice"],
+      "properties": {
+        "profile": { "const": "share-safe-v1" },
+        "notice": { "type": "string", "minLength": 1 },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["identifiers", "textValues", "secrets", "paths"],
+          "properties": {
+            "identifiers": { "$ref": "#/$defs/nonNegativeInteger" },
+            "textValues": { "$ref": "#/$defs/nonNegativeInteger" },
+            "secrets": { "$ref": "#/$defs/nonNegativeInteger" },
+            "paths": { "$ref": "#/$defs/nonNegativeInteger" }
+          }
+        }
+      }
+    },
+    "sessions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/session" }
+    },
+    "omittedAttachments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/attachment" }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "$ref": "#/$defs/file" }
+    }
+  },
+  "$defs": {
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "sessionAlias": {
+      "type": "string",
+      "pattern": "^session-[0-9]+$"
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "file", "eventCount", "originalSeqs", "lineageOnly"],
+      "properties": {
+        "id": { "$ref": "#/$defs/sessionAlias" },
+        "parentSession": { "$ref": "#/$defs/sessionAlias" },
+        "file": {
+          "type": "string",
+          "pattern": "^sessions/session-[0-9]+\\.jsonl$"
+        },
+        "eventCount": { "$ref": "#/$defs/nonNegativeInteger" },
+        "originalSeqs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/nonNegativeInteger" }
+        },
+        "lineageOnly": { "type": "boolean" }
+      }
+    },
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "bytes", "reason"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^attachment-[0-9]+$" },
+        "bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "reason": { "const": "privacy-default" }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^(?:REPORT\\.md|sessions/session-[0-9]+\\.jsonl)$"
+        },
+        "bytes": { "$ref": "#/$defs/nonNegativeInteger" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
+  }
+}

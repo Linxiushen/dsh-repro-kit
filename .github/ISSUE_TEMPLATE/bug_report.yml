@@ -1,0 +1,39 @@
+name: Bug report
+description: Report an incorrect slice, redaction, bundle, or verification result
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not upload an unreviewed production session export. Prefer a synthetic fixture or a manually reviewed dsh-repro bundle.
+  - type: input
+    id: version
+    attributes:
+      label: dsh-repro-kit version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command or API
+      options: [inspect, slice, verify, library API]
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Synthetic reproduction or reviewed bundle
+      description: Attach only data you are authorized to share.
