@@ -74,12 +74,12 @@
     "fflate": "0.8.3"
   },
   "devDependencies": {
-    "@types/node": "^22.20.0",
-    "@vitest/coverage-v8": "4.1.10",
-    "oxlint": "1.76.0",
-    "publint": "0.3.23",
-    "tsdown": "0.22.14",
-    "typescript": "6.0.3",
-    "vitest": "4.1.10"
+    "@types/node": "^26.4.1",
+    "@vitest/coverage-v8": "5.0.0",
+    "oxlint": "1.81.0",
+    "publint": "0.3.24",
+    "tsdown": "0.23.0",
+    "typescript": "7.0.2",
+    "vitest": "5.0.0"
   }
 }
